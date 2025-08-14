@@ -164,6 +164,8 @@ class AppState: ObservableObject {
         }
     }
 
+    @Published var currentScrcpyPackage: String? = nil
+
     // Toggle licensing
     let licenseCheck: Bool = true
 

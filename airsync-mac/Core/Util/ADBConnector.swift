@@ -233,6 +233,77 @@ Raw output:
         }
     }
 
+    // MARK: - App Launch Functionality
+    
+    static func getCurrentForegroundApp(completion: @escaping (String?) -> Void) {
+        guard let adbPath = findExecutable(named: "adb", fallbackPaths: possibleADBPaths) else {
+            logBinaryDetection("ADB not found — cannot get foreground app.")
+            completion(nil)
+            return
+        }
+        
+        let command = "shell dumpsys window | grep mCurrentFocus"
+        logBinaryDetection("Getting foreground app: \(adbPath) \(command)")
+        
+        runADBCommand(adbPath: adbPath, arguments: command.components(separatedBy: " ")) { output in
+            let packageName = extractPackageFromFocus(output)
+            DispatchQueue.main.async {
+                if let package = packageName, !package.isEmpty {
+                    AppState.shared.adbConnectionResult = "Current foreground app: \(package)"
+                    logBinaryDetection("Detected foreground app: \(package)")
+                } else {
+                    AppState.shared.adbConnectionResult = "Could not detect foreground app\nRaw output: \(output)"
+                    logBinaryDetection("Failed to detect foreground app")
+                }
+            }
+            completion(packageName)
+        }
+    }
+    
+    static func launchAppOnDevice(package: String) {
+        guard let adbPath = findExecutable(named: "adb", fallbackPaths: possibleADBPaths) else {
+            DispatchQueue.main.async {
+                AppState.shared.adbConnectionResult = "ADB not found — cannot launch app."
+            }
+            return
+        }
+        
+        let command = "shell monkey -p \(package) -c android.intent.category.LAUNCHER 1"
+        logBinaryDetection("Launching app on device: \(adbPath) \(command)")
+        
+        runADBCommand(adbPath: adbPath, arguments: command.components(separatedBy: " ")) { output in
+            DispatchQueue.main.async {
+                if output.lowercased().contains("events injected") || output.lowercased().contains("no activities found") {
+                    if output.lowercased().contains("no activities found") {
+                        AppState.shared.adbConnectionResult = "App not found: \(package)\nMake sure the app is installed on your device."
+                    } else {
+                        AppState.shared.adbConnectionResult = "✓ Launched \(package) on device"
+                        logBinaryDetection("Successfully launched \(package) on device")
+                    }
+                } else {
+                    AppState.shared.adbConnectionResult = "Failed to launch \(package)\nOutput: \(output)"
+                    logBinaryDetection("Failed to launch \(package): \(output)")
+                }
+            }
+        }
+    }
+    
+    private static func extractPackageFromFocus(_ output: String) -> String? {
+        // Parse output like: "mCurrentFocus=Window{abc123 u0 com.example.app/com.example.MainActivity}"
+        let lines = output.components(separatedBy: .newlines)
+        for line in lines {
+            if line.contains("mCurrentFocus") {
+                // Extract package name from the format above
+                if let startIndex = line.range(of: " u0 ")?.upperBound,
+                   let endIndex = line.range(of: "/", range: startIndex..<line.endIndex)?.lowerBound {
+                    let packageName = String(line[startIndex..<endIndex])
+                    return packageName.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+        }
+        return nil
+    }
+    
     static func startScrcpy(
         ip: String,
         port: UInt16,
@@ -338,6 +409,9 @@ Raw output:
             let output = String(data: data, encoding: .utf8) ?? "No output"
             DispatchQueue.main.async {
                 AppState.shared.adbConnectionResult = "scrcpy exited:\n" + output
+                // Clean up window monitoring when scrcpy terminates
+                ScrcpyWindowMonitor.shared.stopMonitoring()
+                AppState.shared.currentScrcpyPackage = nil
             }
         }
 
@@ -345,6 +419,15 @@ Raw output:
             try task.run()
             DispatchQueue.main.async {
                 AppState.shared.adbConnectionResult = "(ﾉ´ヮ´)ﾉ Started scrcpy on \(fullAddress)"
+                
+                // Store the package name for overlay button functionality
+                AppState.shared.currentScrcpyPackage = package
+                
+                // Start monitoring for scrcpy window and create overlay
+                ScrcpyWindowMonitor.shared.startMonitoring(
+                    deviceName: deviceNameFormatted,
+                    package: package
+                )
             }
         } catch {
             DispatchQueue.main.async {
